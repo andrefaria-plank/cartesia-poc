@@ -37,6 +37,25 @@
         $("log").appendChild(d);
       };
 
+      // Render a tool-result card (structured data → readable rows). Voice never reads this.
+      const renderCard = (card) => {
+        const titles = {
+          client: "Client", invoices: "Invoices", visits: "Technical visits",
+          deliveries: "Deliveries", payments: "Payments", error: "Error",
+        };
+        const d = document.createElement("div");
+        d.className = "msg card";
+        const head = document.createElement("strong");
+        head.textContent = "📋 " + (titles[card.type] ?? card.type);
+        d.appendChild(head);
+        const pre = document.createElement("pre");
+        pre.style.cssText = "margin:6px 0 0; white-space:pre-wrap; font-size:13px;";
+        const { type, ...rest } = card;
+        pre.textContent = JSON.stringify(rest, null, 2);
+        d.appendChild(pre);
+        $("log").appendChild(d);
+      };
+
       // ── ordered, gapless playback queue (filler first, then audio chunks) ──
       function enqueuePcm(b64) {
         const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -77,7 +96,7 @@
           last.textContent += JSON.parse(e.data).delta;
         });
         es.addEventListener("card", (e) => {
-          log("[card] " + JSON.stringify(JSON.parse(e.data).card), "card");
+          renderCard(JSON.parse(e.data).card);
           // chime.play();  // <- play your card chime here
         });
         es.addEventListener("filler", (e) => enqueuePcm(JSON.parse(e.data).audio));

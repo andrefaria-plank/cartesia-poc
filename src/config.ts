@@ -11,8 +11,10 @@ function required(name: string): string {
 export const config = {
   cartesiaApiKey: required("CARTESIA_API_KEY"),
   voiceId: required("NOA_VOICE_ID"),
+  anthropicApiKey: required("ANTHROPIC_API_KEY"),
   port: Number(process.env.PORT ?? 3000),
 
+  agentModel: "claude-sonnet-4-6", // NOA's reasoning brain
   ttsModel: "sonic-3.5",
   sttModel: "ink-whisper", // Ink STT model id used by the SDK
   language: "en",

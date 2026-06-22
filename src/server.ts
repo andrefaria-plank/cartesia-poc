@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { transcribe, streamTts } from "./cartesia.js";
-import { runAgent, type AgentEvent } from "./agent.js";
+import { runAgent, forgetSession, type AgentEvent } from "./agent.js";
 import { warmFillers, randomFiller } from "./filler.js";
 import {
   openSession,
@@ -25,7 +25,10 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 app.get("/voice/stream/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   openSession(sessionId, res);
-  req.on("close", () => closeSession(sessionId));
+  req.on("close", () => {
+    closeSession(sessionId);
+    forgetSession(sessionId);
+  });
 });
 
 // (3) Client posts one recorded utterance → "Manda mensagem de voz".
@@ -66,7 +69,7 @@ async function handleTurn(id: string, audio: Buffer): Promise<void> {
 
   // Fan the agent stream into: spoken text (-> Sonic) and cards (-> UI + chime).
   const textStream = (async function* (): AsyncIterable<string> {
-    for await (const ev of runAgent(userText) as AsyncIterable<AgentEvent>) {
+    for await (const ev of runAgent(id, userText) as AsyncIterable<AgentEvent>) {
       if (ev.kind === "text") {
         send(id, "text", { delta: ev.delta }); // drives transcript UI
         yield ev.delta;
