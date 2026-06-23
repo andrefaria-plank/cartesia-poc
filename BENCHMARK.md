@@ -1,7 +1,7 @@
 # Cartesia STT/TTS Benchmark Results
 
 **Date:** 2026-06-17
-**Command:** `npm run bench -- 10` (10 runs × 3 phrases = 30 samples each)
+**Command:** `pnpm bench 10` (10 runs × 3 phrases = 30 samples each)
 **Config:** `tts=sonic-3.5` · `stt=ink-whisper` · `sampleRate=16000Hz`
 **Method:** phrases synthesized with Sonic, then fed back into Ink — speed measured
 both directions; WER is on synthetic speech (sanity check, not a real-user quality test).

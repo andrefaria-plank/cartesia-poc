@@ -8,13 +8,15 @@ No barge-in (per spec): the client finishes speaking before the mic re-arms.
 
 ## Setup
 
+This project uses **pnpm** (enforced via a `preinstall` guard).
+
 ```bash
-npm install
-cp .env.example .env   # fill in CARTESIA_API_KEY and NOA_VOICE_ID
-npm run dev
+pnpm install
+cp .env.example .env   # fill in CARTESIA_API_KEY, NOA_VOICE_ID, AUTH_USERNAME, AUTH_PASSWORD, SESSION_SECRET
+pnpm dev
 ```
 
-Open http://localhost:3000 → **Start voice mode** → **hold to talk**.
+Open http://localhost:3000 → sign in → **Start voice mode** → **hold to talk**.
 
 ## Layout
 
@@ -49,8 +51,8 @@ sequentially in the browser's `AudioContext` for gapless playback.
 ## Benchmark STT/TTS speed
 
 ```bash
-npm run bench          # 5 runs per phrase
-npm run bench -- 10    # 10 runs per phrase
+pnpm bench          # 5 runs per phrase
+pnpm bench 10       # 10 runs per phrase
 ```
 
 Synthesizes known phrases with Sonic, feeds the audio back into Ink, and reports

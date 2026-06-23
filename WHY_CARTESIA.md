@@ -57,7 +57,7 @@ Run on `2026-06-17`, 30 samples each, from a Node server over the public interne
 | **Estimated perceived latency** | **~640ms + LLM** ≈ **~1.0–1.1s** | Inside the "feels natural" (<1.8s) band |
 
 These are real numbers from this repo, not marketing claims — reproducible with
-`npm run bench`.
+`pnpm bench`.
 
 ---
 

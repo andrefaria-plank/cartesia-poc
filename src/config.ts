@@ -14,6 +14,13 @@ export const config = {
   anthropicApiKey: required("ANTHROPIC_API_KEY"),
   port: Number(process.env.PORT ?? 3000),
 
+  // ── Dumb login gate ──
+  authUsername: required("AUTH_USERNAME"),
+  authPassword: required("AUTH_PASSWORD"),
+  // Signs the session cookie. Any long random string; rotating it logs everyone out.
+  sessionSecret: required("SESSION_SECRET"),
+  sessionTtlMs: 12 * 60 * 60_000, // 12h
+
   agentModel: "claude-sonnet-4-6", // NOA's reasoning brain
   ttsModel: "sonic-3.5",
   sttModel: "ink-whisper", // Ink STT model id used by the SDK

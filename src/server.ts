@@ -1,11 +1,19 @@
-import express from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import next from "next";
 import { config } from "./config.js";
 import { transcribe, streamTts } from "./cartesia.js";
 import { runAgent, forgetSession, type AgentEvent } from "./agent.js";
 import { warmFillers, randomFiller } from "./filler.js";
+import {
+  COOKIE_NAME,
+  checkCredentials,
+  issueToken,
+  verifyToken,
+  readCookie,
+} from "./auth.js";
 import {
   openSession,
   closeSession,
@@ -16,8 +24,60 @@ import {
 } from "./sessions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const dev = process.env.NODE_ENV !== "production";
+const nextApp = next({ dev, dir: path.join(__dirname, "..") });
+const handleNext = nextApp.getRequestHandler();
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
+
+// ── Auth gate ──────────────────────────────────────────────────────────────
+// Reachable without a session: login page, its asset bundle, the login API.
+// Everything else (voice client + SSE/upload API) requires a valid cookie.
+function isPublicPath(p: string): boolean {
+  return (
+    p === "/login" ||
+    p.startsWith("/_next/") ||
+    p.startsWith("/api/auth/") ||
+    p === "/favicon.ico"
+  );
+}
+
+// Login: compare creds to .env, set an httpOnly signed cookie on success.
+app.post("/api/auth/login", express.json(), (req, res) => {
+  const { username, password } = req.body ?? {};
+  if (typeof username !== "string" || typeof password !== "string") {
+    res.status(400).json({ error: "username and password required" });
+    return;
+  }
+  if (!checkCredentials(username, password)) {
+    res.status(401).json({ error: "invalid credentials" });
+    return;
+  }
+  res.cookie(COOKIE_NAME, issueToken(username), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: !dev,
+    maxAge: config.sessionTtlMs,
+    path: "/",
+  });
+  res.json({ ok: true });
+});
+
+app.post("/api/auth/logout", (_req, res) => {
+  res.clearCookie(COOKIE_NAME, { path: "/" });
+  res.json({ ok: true });
+});
+
+app.use((req: Request, res: Response, nextFn: NextFunction) => {
+  if (isPublicPath(req.path)) return nextFn();
+  if (verifyToken(readCookie(req.headers.cookie, COOKIE_NAME))) return nextFn();
+  // API callers get a clean 401; page navigations get bounced to /login.
+  if (req.path.startsWith("/voice/") || req.path.startsWith("/api/")) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  return res.redirect("/login");
+});
 
 app.use(express.static(path.join(__dirname, "..", "public")));
 
@@ -104,7 +164,15 @@ async function handleTurn(id: string, audio: Buffer): Promise<void> {
   );
 }
 
-app.listen(config.port, async () => {
-  await warmFillers();
-  console.log(`NOA Voice Mode API listening on http://localhost:${config.port}`);
-});
+// Everything not handled above (the /login page + its assets) → Next.js.
+app.all("*", (req, res) => handleNext(req, res));
+
+async function bootstrap() {
+  await nextApp.prepare();
+  app.listen(config.port, async () => {
+    await warmFillers();
+    console.log(`NOA Voice Mode listening on http://localhost:${config.port}`);
+  });
+}
+
+bootstrap();
