@@ -26,7 +26,9 @@ Open http://localhost:3000 → **Start voice mode** → **hold to talk**.
 | `src/agent.ts`    | NOA agent stub — yields `text` (spoken) vs `card` (visual) separately |
 | `src/sessions.ts` | SSE registry, ordered `seq`, silence timeout |
 | `src/server.ts`   | Routes + per-turn orchestration |
-| `public/index.html` | Browser client: EventSource + gapless Web Audio queue + push-to-talk |
+| `public/index.html` | Browser client shell: landing + full-screen voice stage |
+| `public/styles.css` | Visual system ("Indigo Clinical"): OKLCH tokens, light/dark, components |
+| `public/app.js`   | Client engine: SSE + gapless Web Audio + VAD mic + live spectrum waveform + phase machine + tool cards |
 
 ## SSE event protocol (server → client)
 
