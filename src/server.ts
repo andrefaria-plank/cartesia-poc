@@ -50,7 +50,11 @@ app.post("/voice/message/:sessionId", upload.single("audio"), async (req, res) =
   try {
     await handleTurn(sessionId, req.file.buffer);
   } catch (err) {
-    send(sessionId, "error", { message: (err as Error).message });
+    // Distinct event name on purpose: EventSource delivers a server-sent event
+    // named "error" to the SAME handler as transport-level errors, so the client
+    // can't tell them apart and an app error gets swallowed. "turn_error" gives
+    // the client its own listener to surface the message and re-arm.
+    send(sessionId, "turn_error", { message: (err as Error).message });
   }
 });
 
