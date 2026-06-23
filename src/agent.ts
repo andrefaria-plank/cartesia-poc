@@ -12,6 +12,13 @@ const anthropic = new Anthropic({ apiKey: config.anthropicApiKey });
 // Per-session conversation history → real multi-turn dialogue (not a stub).
 const histories = new Map<string, MessageParam[]>();
 
+// In-flight turns, keyed by session. The history is a single shared array per
+// session, and the Anthropic API rejects a request the moment a `tool_use`
+// block no longer immediately precedes its `tool_result`. Two overlapping turns
+// (double-tap, retry, a second tab) would interleave their pushes and desync,
+// so a session may only run one turn at a time.
+const inFlight = new Set<string>();
+
 const SYSTEM = `You are NOA, a warm voice assistant for a home-care service company.
 You are talking to the customer OUT LOUD — your text is read aloud by a speech engine.
 
@@ -31,49 +38,67 @@ Rules:
  * Claude never "speaks" audio; it reasons and emits text. Cartesia handles all voice.
  */
 export async function* runAgent(sessionId: string, userText: string): AsyncIterable<AgentEvent> {
-  const history = histories.get(sessionId) ?? [];
-  history.push({ role: "user", content: userText });
-
-  // Agentic loop: stream text, run any tools, feed results back, repeat until Claude stops.
-  for (let hop = 0; hop < 6; hop++) {
-    const stream = anthropic.messages.stream({
-      model: config.agentModel,
-      max_tokens: 512,
-      system: SYSTEM,
-      tools: toolDefs,
-      messages: history,
-    });
-
-    for await (const event of stream) {
-      if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-        yield { kind: "text", delta: event.delta.text }; // spoken -> Sonic
-      }
-    }
-
-    const msg = await stream.finalMessage();
-    history.push({ role: "assistant", content: msg.content });
-
-    const toolUses = msg.content.filter((b) => b.type === "tool_use");
-    if (toolUses.length === 0) break; // Claude is done talking
-
-    // Execute each tool, emit its raw result as a UI card, feed result back to Claude.
-    const results: ContentBlockParam[] = [];
-    for (const tu of toolUses) {
-      const out = runTool(tu.name, (tu.input ?? {}) as Record<string, unknown>);
-      yield { kind: "card", card: out.card }; // visual only — never read aloud
-      results.push({
-        type: "tool_result",
-        tool_use_id: tu.id,
-        content: JSON.stringify(out.data),
-      });
-    }
-    history.push({ role: "user", content: results });
+  // One turn per session at a time (see `inFlight`). Reject overlaps instead of
+  // letting them interleave the shared history.
+  if (inFlight.has(sessionId)) {
+    throw new Error("a turn is already in progress for this session");
   }
+  inFlight.add(sessionId);
 
-  histories.set(sessionId, history);
+  // Build the turn on a COPY of the committed history; it is written back only
+  // if the whole turn succeeds. So a mid-loop failure (stream/tool throws) can't
+  // leave a dangling `user` message that would produce two user turns in a row.
+  const messages: MessageParam[] = [
+    ...(histories.get(sessionId) ?? []),
+    { role: "user", content: userText },
+  ];
+
+  try {
+    // Agentic loop: stream text, run any tools, feed results back, repeat until Claude stops.
+    for (let hop = 0; hop < 6; hop++) {
+      const stream = anthropic.messages.stream({
+        model: config.agentModel,
+        max_tokens: 512,
+        system: SYSTEM,
+        tools: toolDefs,
+        messages,
+      });
+
+      for await (const event of stream) {
+        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+          yield { kind: "text", delta: event.delta.text }; // spoken -> Sonic
+        }
+      }
+
+      const msg = await stream.finalMessage();
+      messages.push({ role: "assistant", content: msg.content });
+
+      const toolUses = msg.content.filter((b) => b.type === "tool_use");
+      if (toolUses.length === 0) break; // Claude is done talking
+
+      // Execute each tool, emit its raw result as a UI card, feed result back to Claude.
+      const results: ContentBlockParam[] = [];
+      for (const tu of toolUses) {
+        const out = runTool(tu.name, (tu.input ?? {}) as Record<string, unknown>);
+        yield { kind: "card", card: out.card }; // visual only — never read aloud
+        results.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: JSON.stringify(out.data),
+        });
+      }
+      messages.push({ role: "user", content: results });
+    }
+
+    // Commit only after a fully successful turn.
+    histories.set(sessionId, messages);
+  } finally {
+    inFlight.delete(sessionId);
+  }
 }
 
 /** Drop a session's memory when its SSE channel closes. */
 export function forgetSession(sessionId: string): void {
   histories.delete(sessionId);
+  inFlight.delete(sessionId);
 }
