@@ -53,6 +53,7 @@ export async function synthesizeOnce(transcript: string): Promise<string> {
 export async function streamTts(
   textDeltas: AsyncIterable<string>,
   onAudioChunk: (pcmBase64: string) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const ws = cartesia.tts.websocket({
     container: "raw",
@@ -68,6 +69,18 @@ export async function streamTts(
     resolveDone = resolve;
     rejectDone = reject;
   });
+
+  // Barge-in: drop the socket and unblock immediately so the turn can tear down.
+  const onAbort = () => {
+    try {
+      ws.disconnect();
+    } catch {
+      /* already closed */
+    }
+    resolveDone();
+  };
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
 
   let attached = false;
   const attach = (response: Awaited<ReturnType<typeof ws.send>>) => {
@@ -95,12 +108,15 @@ export async function streamTts(
 
   try {
     for await (const delta of textDeltas) {
+      if (signal?.aborted) return;
       if (delta.trim()) await sendChunk(delta, false);
     }
+    if (signal?.aborted) return;
     await sendChunk("", true); // flush the final context
     if (!attached) return; // nothing was ever spoken
     await finished;
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     ws.disconnect();
   }
 }

@@ -4,7 +4,11 @@ Turn-based voice agent: **Ink (STT) → NOA agent → Sonic (TTS)**, streamed to
 browser over **SSE + base64 audio**. Implements the sequence diagram: open SSE →
 send voice message → instant filler → streamed text + audio chunks → `done`.
 
-No barge-in (per spec): the client finishes speaking before the mic re-arms.
+Supports **barge-in**: the user can cut NOA off mid-reply. Voice mode (hands-free
+— the live mic detects you starting to talk) or manual (tap the wave / Interrupt
+button). A barge-in cuts local playback, `POST`s `/voice/abort/:sessionId` to stop
+the in-flight turn (Claude stream + Sonic socket aborted, agent lock released),
+and captures the interrupting utterance as the next turn.
 
 ## Setup
 
@@ -43,6 +47,10 @@ Open http://localhost:3000 → **Start voice mode** → **hold to talk**.
 | `done`       | `{}`            | turn end → drain queue, re-arm mic |
 | `error`      | `{ message }`   | failure |
 
+Client → server: `POST /voice/message/:sessionId` (one utterance, supersedes any
+in-flight turn) and `POST /voice/abort/:sessionId` (barge-in: abort the in-flight
+turn). An aborted turn emits no `done` and is discarded from history.
+
 Audio is raw `pcm_s16le` @ 16 kHz, base64 in the SSE `data:` field, scheduled
 sequentially in the browser's `AudioContext` for gapless playback.
 
@@ -73,6 +81,8 @@ The live server also logs a per-turn breakdown: `[turn] {filler_ms, stt_ms, tts_
 
 ## Next steps
 
-- Replace `src/agent.ts` with a real streaming LLM call.
-- Swap push-to-talk for client-side VAD/silence detection.
 - If base64-over-SSE bandwidth bites, move just the `audio` channel to a WebSocket.
+- Harden voice barge-in echo rejection (compare the heard transcript to NOA's
+  current speech) so it's robust on speakers, not just headphones.
+- Defer barge-in teardown while a tool is mid-flight so an interrupt can't strand
+  a half-done action (the agent already commits history only on success).
