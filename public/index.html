@@ -3,164 +3,132 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NOA Voice Mode — test</title>
-    <style>
-      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
-      button { font-size: 18px; padding: 12px 20px; border-radius: 10px; border: 1px solid #ccc; cursor: pointer; }
-      #status { color: #666; margin: 12px 0; }
-      .msg { padding: 8px 12px; border-radius: 10px; margin: 6px 0; }
-      .user { background: #e8f0fe; } .noa { background: #f1f3f4; }
-      .card { background: #fff8e1; border: 1px solid #f0d000; }
-    </style>
+    <meta name="color-scheme" content="light dark" />
+    <title>NOA Voice Mode</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <h1>NOA Voice Mode</h1>
-    <p id="status">idle</p>
-    <button id="start">Start voice mode</button>
-    <button id="talk" disabled>Talk</button>
-    <button id="end" disabled>End</button>
-    <div id="log"></div>
+    <div class="app">
+      <!-- Top bar -->
+      <header class="topbar">
+        <span class="brand">
+          <span class="brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 10v4" /><path d="M8 6v12" /><path d="M12 3v18" /><path d="M16 7v10" /><path d="M20 10v4" />
+            </svg>
+          </span>
+          <span>
+            <span class="brand__name">NOA</span>
+            <span class="brand__sub">Voice Mode</span>
+          </span>
+        </span>
 
-    <script type="module">
-      const SR = 16000;
-      let sessionId = null;
-      let es = null;
-      let ctx = null;
-      let playHead = 0;
+        <span class="topbar__status" id="statusRow" data-live="false">
+          <span class="topbar__dot"></span>
+          <span id="statusText">Idle</span>
+        </span>
 
-      const $ = (id) => document.getElementById(id);
-      const setStatus = (t) => ($("status").textContent = t);
-      const log = (text, cls) => {
-        const d = document.createElement("div");
-        d.className = `msg ${cls}`;
-        d.textContent = text;
-        $("log").appendChild(d);
-      };
+        <div class="topbar__actions">
+          <button class="btn btn--icon" id="theme" type="button" aria-label="Toggle theme" title="Toggle theme">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
+        </div>
+      </header>
 
-      // ── ordered, gapless playback queue (filler first, then audio chunks) ──
-      function enqueuePcm(b64) {
-        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-        const i16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-        const buf = ctx.createBuffer(1, i16.length, SR);
-        const f32 = buf.getChannelData(0);
-        for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        const start = Math.max(playHead, ctx.currentTime);
-        src.start(start);
-        playHead = start + buf.duration;
-      }
+      <!-- Landing -->
+      <main class="stage-scroll" id="landing">
+        <section class="landing">
+          <span class="landing__badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" />
+              <path d="M12 18v3" />
+            </svg>
+          </span>
+          <h1 class="landing__title">Talk to NOA</h1>
+          <p class="landing__sub">
+            A hands-free voice assistant for home-care customers. Ask about your
+            account out loud — NOA looks it up and answers, while the details
+            appear on screen.
+          </p>
+          <button class="landing__cta" id="start" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" /><path d="M12 18v3" />
+            </svg>
+            Start voice mode
+          </button>
 
-      $("start").onclick = async () => {
-        ctx = new AudioContext({ sampleRate: SR });
-        playHead = ctx.currentTime;
-        sessionId = crypto.randomUUID();
-        es = new EventSource(`/voice/stream/${sessionId}`);
+          <div class="landing__examples">
+            <span class="example">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+              "Do I have any unpaid bills?"
+            </span>
+            <span class="example">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+              "When is my next technician visit?"
+            </span>
+            <span class="example">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h11v8H3zM14 10h4l3 3v2h-7z"/><circle cx="6.5" cy="17.5" r="1.5"/><circle cx="17.5" cy="17.5" r="1.5"/></svg>
+              "Where's my blood pressure monitor?"
+            </span>
+            <span class="example">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+              "Did my last payment go through?"
+            </span>
+          </div>
+          <p class="landing__foot">Ink STT · Claude · Sonic TTS — streamed over SSE</p>
+        </section>
+      </main>
+    </div>
 
-        es.addEventListener("ready", () => {
-          setStatus("ready — hold to talk");
-          $("start").disabled = true;
-          $("talk").disabled = false;
-          $("end").disabled = false;
-        });
-        es.addEventListener("transcript", (e) => log("You: " + JSON.parse(e.data).text, "user"));
-        es.addEventListener("text", (e) => {
-          // append streamed agent text to the latest NOA bubble
-          let last = $("log").lastElementChild;
-          if (!last || !last.classList.contains("noa")) {
-            last = document.createElement("div");
-            last.className = "msg noa";
-            last.textContent = "NOA: ";
-            $("log").appendChild(last);
-          }
-          last.textContent += JSON.parse(e.data).delta;
-        });
-        es.addEventListener("card", (e) => {
-          log("[card] " + JSON.stringify(JSON.parse(e.data).card), "card");
-          // chime.play();  // <- play your card chime here
-        });
-        es.addEventListener("filler", (e) => enqueuePcm(JSON.parse(e.data).audio));
-        es.addEventListener("audio", (e) => enqueuePcm(JSON.parse(e.data).audio));
-        es.addEventListener("done", () => setStatus("ready — hold to talk")); // no barge-in: re-arm only now
-        es.addEventListener("error", (e) => setStatus("error: " + (e.data ?? "stream")));
-      };
+    <!-- Voice stage (full-screen takeover) -->
+    <section class="voice-stage" id="stage" data-phase="connecting" tabindex="-1" hidden>
+      <div class="voice-stage__top">
+        <span class="voice-stage__brand">
+          <span class="brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 10v4" /><path d="M8 6v12" /><path d="M12 3v18" /><path d="M16 7v10" /><path d="M20 10v4" />
+            </svg>
+          </span>
+          NOA Voice Mode
+        </span>
+        <button class="btn btn--icon" id="exit" type="button" aria-label="Exit voice mode" title="Exit (Esc)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+          </svg>
+        </button>
+      </div>
 
-      // ── tap-to-talk: tap once to listen, auto-stops when you stop speaking ──
-      const SILENCE_RMS = 0.012;      // below this counts as silence
-      const SILENCE_HOLD_MS = 1500;   // trailing silence that ends a turn
-      const MAX_TURN_MS = 30000;      // hard cap so a turn can't run forever
+      <div class="cards-rail" id="cardsRail" aria-label="Tool results"></div>
 
-      let rec = null, chunks = [], micStream = null;
-      let vadRAF = null, silenceSince = 0, hasSpoken = false, listening = false, maxTimer = null;
+      <div class="voice-stage__wave-area">
+        <button class="voice-wave" id="wave" type="button" aria-label="Tap to talk or stop">
+          <span class="voice-wave__bars" id="bars" aria-hidden="true"></span>
+        </button>
+      </div>
 
-      async function startListening() {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        rec = new MediaRecorder(micStream);
-        chunks = [];
-        rec.ondataavailable = (e) => chunks.push(e.data);
-        rec.onstop = async () => {
-          stopVad();
-          micStream.getTracks().forEach((t) => t.stop());
-          listening = false;
-          $("talk").textContent = "Talk";
-          const fd = new FormData();
-          fd.append("audio", new Blob(chunks, { type: "audio/webm" }), "turn.webm");
-          setStatus("thinking…");
-          await fetch(`/voice/message/${sessionId}`, { method: "POST", body: fd });
-        };
-        rec.start();
-        listening = true;
-        hasSpoken = false;
-        silenceSince = 0;
-        $("talk").textContent = "Listening… (tap to stop)";
-        setStatus("listening…");
-        startVad(micStream);
-        maxTimer = setTimeout(stopRec, MAX_TURN_MS);
-      }
+      <div class="voice-stage__readout">
+        <p class="voice-stage__phase" id="phaseLabel" aria-live="polite">Connecting</p>
+        <p class="voice-stage__caption" id="caption" aria-live="polite"></p>
+      </div>
 
-      function startVad(stream) {
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 2048;
-        ctx.createMediaStreamSource(stream).connect(analyser);
-        const data = new Float32Array(analyser.fftSize);
-        const tick = () => {
-          analyser.getFloatTimeDomainData(data);
-          let sum = 0;
-          for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-          const rms = Math.sqrt(sum / data.length);
-          const now = performance.now();
-          if (rms >= SILENCE_RMS) {
-            hasSpoken = true;       // don't end on the pause BEFORE the user starts
-            silenceSince = 0;
-          } else if (hasSpoken) {
-            if (silenceSince === 0) silenceSince = now;
-            else if (now - silenceSince > SILENCE_HOLD_MS) { stopRec(); return; }
-          }
-          vadRAF = requestAnimationFrame(tick);
-        };
-        vadRAF = requestAnimationFrame(tick);
-      }
-      function stopVad() {
-        if (vadRAF) cancelAnimationFrame(vadRAF);
-        if (maxTimer) clearTimeout(maxTimer);
-        vadRAF = null; maxTimer = null;
-      }
-      function stopRec() {
-        if (rec && rec.state !== "inactive") rec.stop();
-      }
+      <div class="voice-stage__control">
+        <p class="voice-stage__control-line" id="controlLine">Tap to talk</p>
+        <p class="voice-stage__control-hint" id="controlHint">
+          NOA can check invoices, visits, deliveries &amp; payments
+        </p>
+      </div>
+    </section>
 
-      // Tap once to start; tap again to cut the turn short.
-      $("talk").onclick = () => (listening ? stopRec() : startListening());
-
-      $("end").onclick = () => {
-        es?.close();
-        ctx?.close();
-        setStatus("ended");
-        $("start").disabled = false;
-        $("talk").disabled = true;
-        $("end").disabled = true;
-      };
-    </script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
