@@ -372,7 +372,23 @@ function openStream() {
       startVoiceTurn();
     });
   });
-  es.addEventListener("error", (e) => {
+  // App-level turn failure (server caught an error mid-turn). The server sends
+  // no `done` after this, so we recover here: surface the message and drop to a
+  // tappable idle state. We deliberately do NOT auto re-arm — an older-adult
+  // user should get a moment to read what happened before retrying.
+  es.addEventListener("turn_error", (e) => {
+    let message = "I hit a problem.";
+    try {
+      message = JSON.parse(e.data).message || message;
+    } catch {
+      /* keep default */
+    }
+    console.warn("[turn_error]", message);
+    setPhase("paused");
+    setCaption("NOA", "Sorry, I hit a problem. Tap the wave to try again.", false);
+  });
+  // Transport-level error (connection dropped/closed) — not an app error.
+  es.addEventListener("error", () => {
     if (es && es.readyState === EventSource.CLOSED) setPhase("error");
   });
 }
