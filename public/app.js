@@ -28,8 +28,11 @@ $("theme").onclick = () => {
 };
 
 // ── App state ────────────────────────────────────────────────────────
-let sessionId = null;
-let es = null;
+// History is client-held: the server is stateless, so we keep the Anthropic
+// message array here and send it with every turn (the server hands back an
+// updated copy on `done`).
+let history = [];
+let fillers = []; // base64 PCM clips, loaded once from /fillers.json
 let ctx = null;
 let master = null; // GainNode → destination, taps playbackAnalyser
 let playbackAnalyser = null;
@@ -39,7 +42,6 @@ let playHead = 0;
 let pendingAudio = 0; // scheduled chunks still to finish playing
 let phase = "connecting";
 let assistantText = "";
-let lastUser = "";
 
 // ── Phase machine ────────────────────────────────────────────────────
 const PHASE_LABEL = {
@@ -343,38 +345,97 @@ function startWaveLoop() {
   requestAnimationFrame(tick);
 }
 
-// ── SSE stream ───────────────────────────────────────────────────────
-function openStream() {
-  sessionId = crypto.randomUUID();
-  es = new EventSource(`/voice/stream/${sessionId}`);
+// ── Streaming turn (one POST, SSE-formatted response body) ───────────
+// EventSource can't POST, so we read the streamed response with fetch + a
+// ReadableStream reader and parse the SSE `event:`/`data:` frames ourselves.
+const FILLERS_URL = "/fillers.json";
 
-  es.addEventListener("ready", () => {
-    $("statusRow").dataset.live = "true";
-    $("statusText").textContent = "Live";
-    startVoiceTurn(); // hands-free: begin listening immediately
-  });
-  es.addEventListener("transcript", (e) => {
-    lastUser = JSON.parse(e.data).text || "";
-    if (lastUser) setCaption("You", lastUser, false);
-  });
-  es.addEventListener("filler", (e) => enqueuePcm(JSON.parse(e.data).audio));
-  es.addEventListener("text", (e) => {
-    assistantText += JSON.parse(e.data).delta;
+async function loadFillers() {
+  try {
+    const res = await fetch(FILLERS_URL);
+    if (res.ok) fillers = await res.json();
+  } catch {
+    fillers = []; // no filler is fine; the turn just starts a touch later
+  }
+}
+
+function playFiller() {
+  if (!fillers.length) return;
+  enqueuePcm(fillers[Math.floor(Math.random() * fillers.length)]);
+}
+
+// Dispatch one parsed SSE event to the UI.
+function handleEvent(event, data) {
+  if (event === "transcript") {
+    const t = data.text || "";
+    if (t) setCaption("You", t, false);
+  } else if (event === "text") {
+    assistantText += data.delta;
     setCaption("NOA", assistantText.trim(), true);
-  });
-  es.addEventListener("card", (e) => renderCard(JSON.parse(e.data).card));
-  es.addEventListener("audio", (e) => enqueuePcm(JSON.parse(e.data).audio));
-  es.addEventListener("done", () => {
-    // Wait for the queued audio to finish, then re-arm the mic (no barge-in).
+  } else if (event === "card") {
+    renderCard(data.card);
+  } else if (event === "audio") {
+    enqueuePcm(data.audio);
+  } else if (event === "done") {
+    if (Array.isArray(data.history)) history = data.history; // adopt new history
     waitForPlaybackThen(() => {
       if (assistantText.trim()) setCaption("NOA", assistantText.trim(), false);
       setPhase("paused"); // clear "speaking" so the re-arm guard lets us listen
       startVoiceTurn();
     });
-  });
-  es.addEventListener("error", (e) => {
-    if (es && es.readyState === EventSource.CLOSED) setPhase("error");
-  });
+  } else if (event === "turn_error") {
+    // Server caught an error mid-turn (no `done` follows). Surface it and drop
+    // to a tappable idle state — deliberately no auto re-arm so it can be read.
+    console.warn("[turn_error]", data.message);
+    setPhase("paused");
+    setCaption("NOA", "Sorry, I hit a problem. Tap the wave to try again.", false);
+  }
+}
+
+// POST the utterance + history; stream the turn back and dispatch each frame.
+async function postTurn(audioBlob) {
+  const fd = new FormData();
+  fd.append("audio", audioBlob, "turn.webm");
+  fd.append("history", JSON.stringify(history));
+
+  let res;
+  try {
+    res = await fetch("/api/voice", { method: "POST", body: fd });
+  } catch {
+    setPhase("error");
+    return;
+  }
+  if (!res.ok || !res.body) {
+    setPhase("error");
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // SSE frames are separated by a blank line.
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message";
+      let dataStr = "";
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+      }
+      if (!dataStr) continue;
+      try {
+        handleEvent(event, JSON.parse(dataStr));
+      } catch {
+        /* skip malformed frame */
+      }
+    }
+  }
 }
 
 function waitForPlaybackThen(fn) {
@@ -448,13 +509,8 @@ async function onRecStop() {
     return;
   }
   setPhase("thinking");
-  const fd = new FormData();
-  fd.append("audio", new Blob(chunks, { type: "audio/webm" }), "turn.webm");
-  try {
-    await fetch(`/voice/message/${sessionId}`, { method: "POST", body: fd });
-  } catch {
-    setPhase("error");
-  }
+  playFiller(); // instant latency mask, no server round-trip
+  await postTurn(new Blob(chunks, { type: "audio/webm" }));
 }
 
 function startVad() {
@@ -504,16 +560,21 @@ function handleWaveTap() {
 
 // ── Enter / exit the voice stage ─────────────────────────────────────
 function enterVoiceMode() {
-  // Unlock audio inside the click gesture; the first playback comes later (SSE).
+  // Unlock audio inside the click gesture; the first playback comes later.
   ensureCtx();
   if (ctx.state === "suspended") ctx.resume();
   $("landing").hidden = true;
   $("stage").hidden = false;
   $("stage").focus();
-  setPhase("connecting");
   setCaption("", "", false);
   startWaveLoop();
-  openStream();
+  // Stateless server: nothing to "open". Preload fillers, reset history, listen.
+  history = [];
+  loadFillers();
+  $("statusRow").dataset.live = "true";
+  $("statusText").textContent = "Live";
+  setPhase("connecting");
+  startVoiceTurn(); // hands-free: begin listening immediately
 }
 
 function exitVoiceMode() {
@@ -521,14 +582,13 @@ function exitVoiceMode() {
   stopVad();
   listening = false;
   micStream?.getTracks().forEach((t) => t.stop());
-  es?.close();
-  es = null;
   $("statusRow").dataset.live = "false";
   $("statusText").textContent = "Idle";
   $("stage").hidden = true;
   $("landing").hidden = false;
   clearCards();
   assistantText = "";
+  history = [];
 }
 
 // ── Build the waveform bars + wire controls ──────────────────────────

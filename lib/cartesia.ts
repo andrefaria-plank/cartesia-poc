@@ -2,7 +2,7 @@ import { CartesiaClient } from "@cartesia/cartesia-js";
 import { Blob } from "node:buffer";
 import type { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
-import { config } from "./config.js";
+import { config } from "./config";
 
 export const cartesia = new CartesiaClient({ apiKey: config.cartesiaApiKey });
 
@@ -33,7 +33,8 @@ export async function transcribe(audio: Buffer): Promise<string> {
 }
 
 /**
- * Pre-generate one filler clip (base64 PCM) for latency masking. Call at boot.
+ * Synthesize one whole phrase to base64 PCM. Used by the filler-generation script
+ * (scripts/gen-fillers.ts) to bake the latency-masking clips into a static asset.
  */
 export async function synthesizeOnce(transcript: string): Promise<string> {
   const stream = await cartesia.tts.bytes({
