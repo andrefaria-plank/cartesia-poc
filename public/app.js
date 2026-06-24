@@ -44,11 +44,6 @@ let lastUser = "";
 const liveSources = new Set(); // scheduled playback buffers, for instant cut
 let expectingReply = false; // gate: are incoming assistant events for the live turn?
 
-// Barge-in interruption method. "voice" = hands-free (the mic detects you
-// starting to talk); "manual" = tap the wave or the Interrupt button.
-const BARGE_KEY = "noa-barge-mode";
-let bargeMode = localStorage.getItem(BARGE_KEY) || "voice";
-
 // ── Phase machine ────────────────────────────────────────────────────
 const PHASE_LABEL = {
   connecting: "Connecting",
@@ -69,24 +64,18 @@ function setPhase(p) {
   updateControl();
 }
 
-// Bottom control: the breathing status line, its hint, and (manual mode) the
-// Interrupt button — all derived from the current phase + barge-in method.
+// Bottom control: the breathing status line and its hint, derived from phase.
 function updateControl() {
   const line = $("controlLine");
   const hint = $("controlHint");
-  const btn = $("interruptBtn");
   const replying = phase === "speaking" || phase === "thinking";
-  btn.hidden = !(replying && bargeMode === "manual");
 
   if (phase === "listening") {
     line.textContent = "Listening for you…";
-    hint.textContent = "Tap the wave to stop · NOA replies when you pause";
+    hint.textContent = "Pause when you're done · NOA replies on its own";
   } else if (replying) {
     line.textContent = phase === "speaking" ? "NOA is speaking" : "Working…";
-    hint.textContent =
-      bargeMode === "voice"
-        ? "Just start talking to cut in — NOA stops and listens"
-        : "Tap Interrupt (or the wave) to cut in";
+    hint.textContent = "Just talk over NOA to interrupt — it stops and listens";
   } else if (phase === "error") {
     line.textContent = "Something went wrong";
     hint.textContent = "Tap the wave to try again";
@@ -460,20 +449,37 @@ function waitForPlaybackThen(fn) {
 const SILENCE_RMS = 0.012; // below this counts as silence (end-of-turn)
 const SILENCE_HOLD_MS = 1400; // trailing silence that ends a capture
 const MAX_TURN_MS = 30000; // hard cap on one capture
-// Barge-in: louder + sustained so NOA's own voice (leaking past the browser's
-// echo canceller) doesn't self-interrupt. Tuned for headphones or a quiet room.
-const BARGE_RMS = 0.05;
-const BARGE_HOLD_MS = 320;
+// Voice barge-in: you interrupt NOA just by talking over it — no tapping. To
+// avoid false interrupts from background noise, echo (NOA's own voice leaking
+// past the canceller), or a single clipped word, we require ~2 real spoken
+// words: two voiced runs, each long enough to be a word, separated by a gap.
+const BARGE_RMS = 0.05; // a voiced frame must clear this (louder than echo/hum)
+const BARGE_MIN_WORD_MS = 120; // a voiced run this long counts as one word
+const BARGE_INTRA_GAP_MS = 100; // silence shorter than this is within a word
+const BARGE_RESET_MS = 700; // silence longer than this abandons the attempt
+const BARGE_MIN_WORDS = 2; // need at least this many words to interrupt
+const BARGE_MIN_VOICED_MS = 250; // …and this much total voiced time (noise floor)
 
 let micSource = null; // persistent MediaStreamSource (kept for the whole session)
 let rec = null;
 let chunks = [];
 let silenceSince = 0;
-let bargeSince = 0;
 let hasSpoken = false;
 let listening = false;
 let maxTimer = null;
 let vadRAF = null;
+let lastVadTs = 0; // for per-frame dt in the VAD loop
+
+// Voice-barge-in accumulator (only meaningful while NOA is replying).
+const barge = { words: 0, segMs: 0, gapMs: 0, voicedMs: 0, inSeg: false, counted: false };
+function resetBarge() {
+  barge.words = 0;
+  barge.segMs = 0;
+  barge.gapMs = 0;
+  barge.voicedMs = 0;
+  barge.inSeg = false;
+  barge.counted = false;
+}
 
 /** Open the mic once for the whole voice session (echo-cancelled for barge-in). */
 async function ensureMic() {
@@ -569,10 +575,12 @@ function bargeIn() {
 }
 
 // One VAD loop for the whole session. While listening it ends the turn on
-// trailing silence; while NOA is replying (voice mode) it detects you starting
-// to talk and barges in.
+// trailing silence; while NOA is replying it counts your spoken words and
+// barges in once you've clearly started talking (≥2 words).
 function startVadLoop() {
   if (vadRAF) return;
+  lastVadTs = 0;
+  resetBarge();
   const data = new Float32Array(micAnalyser.fftSize);
   const tick = () => {
     if (!micAnalyser) {
@@ -584,9 +592,11 @@ function startVadLoop() {
     for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
     const rms = Math.sqrt(sum / data.length);
     const now = performance.now();
+    const dt = lastVadTs ? now - lastVadTs : 16;
+    lastVadTs = now;
 
     if (listening) {
-      bargeSince = 0;
+      resetBarge();
       if (rms >= SILENCE_RMS) {
         hasSpoken = true;
         silenceSince = 0;
@@ -594,22 +604,37 @@ function startVadLoop() {
         if (silenceSince === 0) silenceSince = now;
         else if (now - silenceSince > SILENCE_HOLD_MS) stopRec();
       }
-    } else if (
-      bargeMode === "voice" &&
-      (phase === "speaking" || phase === "thinking")
-    ) {
-      // Require sustained loudness so a blip (or echo) doesn't false-trigger.
+    } else if (phase === "speaking" || phase === "thinking") {
+      // Voice barge-in. Count spoken words by tracking voiced runs ("segments")
+      // separated by gaps; interrupt only once ~2 words have landed. A single
+      // long sound (echo, hum, one drawn-out word) is one segment → never enough.
       if (rms >= BARGE_RMS) {
-        if (bargeSince === 0) bargeSince = now;
-        else if (now - bargeSince > BARGE_HOLD_MS) {
-          bargeSince = 0;
+        barge.gapMs = 0;
+        if (!barge.inSeg) {
+          barge.inSeg = true;
+          barge.segMs = 0;
+          barge.counted = false;
+        }
+        barge.segMs += dt;
+        barge.voicedMs += dt;
+        // Count this segment as a word once it's voiced long enough (once only).
+        if (!barge.counted && barge.segMs >= BARGE_MIN_WORD_MS) {
+          barge.words++;
+          barge.counted = true;
+        }
+        if (barge.words >= BARGE_MIN_WORDS && barge.voicedMs >= BARGE_MIN_VOICED_MS) {
+          resetBarge();
           bargeIn();
         }
       } else {
-        bargeSince = 0;
+        barge.gapMs += dt;
+        // A real inter-word gap ends the current segment (a brief dip doesn't).
+        if (barge.inSeg && barge.gapMs >= BARGE_INTRA_GAP_MS) barge.inSeg = false;
+        // A long silence means it wasn't a real interruption — start over.
+        if (barge.gapMs >= BARGE_RESET_MS) resetBarge();
       }
     } else {
-      bargeSince = 0;
+      resetBarge();
     }
     vadRAF = requestAnimationFrame(tick);
   };
@@ -628,15 +653,6 @@ function handleWaveTap() {
     return;
   }
   startVoiceTurn();
-}
-
-// Reflect the active barge-in method in the segmented control + persist it.
-function setBargeMode(mode) {
-  bargeMode = mode;
-  localStorage.setItem(BARGE_KEY, mode);
-  for (const item of $("modeSeg").children)
-    item.dataset.selected = String(item.dataset.mode === mode);
-  updateControl();
 }
 
 // ── Enter / exit the voice stage ─────────────────────────────────────
@@ -689,10 +705,7 @@ function exitVoiceMode() {
 $("start").onclick = enterVoiceMode;
 $("wave").onclick = handleWaveTap;
 $("exit").onclick = exitVoiceMode;
-$("interruptBtn").onclick = bargeIn;
-for (const item of $("modeSeg").children)
-  item.onclick = () => setBargeMode(item.dataset.mode);
-setBargeMode(bargeMode); // initialise the segmented control + control copy
+updateControl(); // initialise the control copy
 
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("stage").hidden) exitVoiceMode();

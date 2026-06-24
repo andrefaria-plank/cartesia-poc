@@ -4,11 +4,13 @@ Turn-based voice agent: **Ink (STT) → NOA agent → Sonic (TTS)**, streamed to
 browser over **SSE + base64 audio**. Implements the sequence diagram: open SSE →
 send voice message → instant filler → streamed text + audio chunks → `done`.
 
-Supports **barge-in**: the user can cut NOA off mid-reply. Voice mode (hands-free
-— the live mic detects you starting to talk) or manual (tap the wave / Interrupt
-button). A barge-in cuts local playback, `POST`s `/voice/abort/:sessionId` to stop
-the in-flight turn (Claude stream + Sonic socket aborted, agent lock released),
-and captures the interrupting utterance as the next turn.
+Supports **barge-in**: just talk over NOA to cut it off mid-reply — no tapping.
+The live mic counts your spoken words and interrupts once you've clearly started
+talking (≥2 words), so background noise, echo, or a single clipped word don't
+false-trigger. A barge-in cuts local playback, `POST`s `/voice/abort/:sessionId`
+to stop the in-flight turn (Claude stream + Sonic socket aborted, agent lock
+released), and captures the interrupting utterance as the next turn. (Tapping the
+wave still works as a manual fallback.)
 
 ## Setup
 
