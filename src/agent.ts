@@ -37,7 +37,11 @@ Rules:
  * Yields spoken `text` deltas (-> Sonic) and `card` events (raw tool data -> UI) SEPARATELY.
  * Claude never "speaks" audio; it reasons and emits text. Cartesia handles all voice.
  */
-export async function* runAgent(sessionId: string, userText: string): AsyncIterable<AgentEvent> {
+export async function* runAgent(
+  sessionId: string,
+  userText: string,
+  signal?: AbortSignal,
+): AsyncIterable<AgentEvent> {
   // One turn per session at a time (see `inFlight`). Reject overlaps instead of
   // letting them interleave the shared history.
   if (inFlight.has(sessionId)) {
@@ -56,20 +60,31 @@ export async function* runAgent(sessionId: string, userText: string): AsyncItera
   try {
     // Agentic loop: stream text, run any tools, feed results back, repeat until Claude stops.
     for (let hop = 0; hop < 6; hop++) {
-      const stream = anthropic.messages.stream({
-        model: config.agentModel,
-        max_tokens: 512,
-        system: SYSTEM,
-        tools: toolDefs,
-        messages,
-      });
+      const stream = anthropic.messages.stream(
+        {
+          model: config.agentModel,
+          max_tokens: 512,
+          system: SYSTEM,
+          tools: toolDefs,
+          messages,
+        },
+        { signal },
+      );
 
-      for await (const event of stream) {
-        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          yield { kind: "text", delta: event.delta.text }; // spoken -> Sonic
+      try {
+        for await (const event of stream) {
+          if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+            yield { kind: "text", delta: event.delta.text }; // spoken -> Sonic
+          }
         }
+      } catch (err) {
+        // A barge-in aborts the stream: stop gracefully and DON'T commit, so the
+        // interrupted (partial) turn leaves the committed history untouched.
+        if (signal?.aborted) return;
+        throw err;
       }
 
+      if (signal?.aborted) return; // barge-in landed between deltas — discard
       const msg = await stream.finalMessage();
       messages.push({ role: "assistant", content: msg.content });
 
