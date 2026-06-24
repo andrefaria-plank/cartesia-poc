@@ -11,13 +11,24 @@ No barge-in (per spec): the client finishes speaking before the mic re-arms.
 ## Setup
 
 ```bash
-npm install
-cp .env.example .env   # fill in CARTESIA_API_KEY, NOA_VOICE_ID, ANTHROPIC_API_KEY
-npm run gen:fillers    # one-time: bake the latency-masking filler clips → public/fillers.json
-npm run dev
+pnpm install
+cp .env.example .env   # fill in Cartesia/voice/Anthropic keys + AUTH_USERNAME/AUTH_PASSWORD/SESSION_SECRET
+pnpm gen:fillers       # one-time: bake the latency-masking filler clips → public/fillers.json
+pnpm dev
 ```
 
-Open http://localhost:3000 → **Start voice mode** → tap the wave and talk.
+Open http://localhost:3000 → sign in (`AUTH_USERNAME` / `AUTH_PASSWORD`) →
+**Start voice mode** → tap the wave and talk.
+
+> **pnpm only.** A `preinstall` guard enforces it (matches `main`).
+
+## Login gate
+
+A Next.js **proxy/middleware** (`middleware.ts`) gates the voice client and
+`/api/voice` behind a session cookie. `/login` posts to `/api/auth/login`, which
+checks credentials against `.env` and issues an HMAC-signed httpOnly cookie
+(`lib/auth.ts`, Web Crypto so it runs in both Edge middleware and Node routes).
+Public paths: `/login`, `/_next/*`, `/api/auth/*`, `/favicon.ico`.
 
 ## Layout
 
