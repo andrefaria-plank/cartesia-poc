@@ -74,7 +74,10 @@ app.post("/voice/message/:sessionId", upload.single("audio"), async (req, res) =
   const done = handleTurn(sessionId, req.file.buffer, ac.signal).catch(
     (err) => {
       if (!ac.signal.aborted) {
-        send(sessionId, "error", { message: (err as Error).message });
+        // Named `turn_error`, not `error`: EventSource delivers a plain `error`
+        // event to the same handler as transport failures, so a turn error sent
+        // that way is silently swallowed client-side.
+        send(sessionId, "turn_error", { message: (err as Error).message });
       }
     },
   );

@@ -418,7 +418,20 @@ function openStream() {
       startCapture();
     });
   });
-  es.addEventListener("error", (e) => {
+  // Turn-level failure from the server. Named `turn_error` (not `error`) so it
+  // doesn't collide with EventSource's built-in transport-error handler below.
+  es.addEventListener("turn_error", (e) => {
+    if (!expectingReply) return; // stale error from a superseded/aborted turn
+    expectingReply = false;
+    cutPlayback();
+    const { message } = JSON.parse(e.data);
+    setCaption("", message ? `Something went wrong: ${message}` : "Something went wrong.", false);
+    setPhase("paused"); // clear the busy state so the re-arm guard lets us listen
+    startCapture(); // keep the session alive — let the user just try again
+  });
+  // Transport-level error (connection dropped). EventSource auto-reconnects;
+  // only surface a hard failure once it gives up and closes.
+  es.addEventListener("error", () => {
     if (es && es.readyState === EventSource.CLOSED) setPhase("error");
   });
 }
@@ -551,7 +564,6 @@ function bargeIn() {
 // to talk and barges in.
 function startVadLoop() {
   if (vadRAF) return;
-  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const data = new Float32Array(micAnalyser.fftSize);
   const tick = () => {
     if (!micAnalyser) {
@@ -575,7 +587,6 @@ function startVadLoop() {
       }
     } else if (
       bargeMode === "voice" &&
-      !reduce &&
       (phase === "speaking" || phase === "thinking")
     ) {
       // Require sustained loudness so a blip (or echo) doesn't false-trigger.

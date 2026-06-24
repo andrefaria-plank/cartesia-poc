@@ -45,7 +45,7 @@ Open http://localhost:3000 → **Start voice mode** → **hold to talk**.
 | `card`       | `{ card }`      | visual card (+ chime) |
 | `audio`      | `{ seq, audio }`| ordered base64 PCM chunk |
 | `done`       | `{}`            | turn end → drain queue, re-arm mic |
-| `error`      | `{ message }`   | failure |
+| `turn_error` | `{ message }`   | turn failure (client surfaces it, then re-arms) |
 
 Client → server: `POST /voice/message/:sessionId` (one utterance, supersedes any
 in-flight turn) and `POST /voice/abort/:sessionId` (barge-in: abort the in-flight
