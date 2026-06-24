@@ -106,7 +106,7 @@ async function handleTurn(
   const tFiller = performance.now();
 
   // STT (Ink) — whole utterance.
-  const userText = await transcribe(audio);
+  const userText = await transcribe(audio, signal);
   if (signal.aborted) return;
   const tStt = performance.now();
   send(id, "transcript", { text: userText }); // persisted to chat history client-side

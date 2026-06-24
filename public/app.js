@@ -37,6 +37,7 @@ let micAnalyser = null;
 let micStream = null;
 let playHead = 0;
 let pendingAudio = 0; // scheduled chunks still to finish playing
+let playbackGen = 0; // bumped whenever a turn ends/aborts, to void stale drain callbacks
 let phase = "connecting";
 let assistantText = "";
 let lastUser = "";
@@ -315,6 +316,10 @@ function cutPlayback() {
   liveSources.clear();
   pendingAudio = 0;
   if (ctx) playHead = ctx.currentTime;
+  // Cutting playback (barge-in/exit) makes the buffer look "drained", which would
+  // otherwise let a pending waitForPlaybackThen() callback fire and clobber the
+  // phase of the turn that's already superseding this one. Void it.
+  playbackGen++;
 }
 
 // ── Waveform render loop (drives every bar each frame) ────────────────
@@ -425,9 +430,11 @@ function openStream() {
     expectingReply = false;
     cutPlayback();
     const { message } = JSON.parse(e.data);
+    // Land in the error phase and stop — do NOT auto-re-arm: startCapture() resets
+    // the caption in the same tick, which would wipe this message before it paints.
+    // The error phase invites a wave-tap to try again (see handleWaveTap).
+    setPhase("error");
     setCaption("", message ? `Something went wrong: ${message}` : "Something went wrong.", false);
-    setPhase("paused"); // clear the busy state so the re-arm guard lets us listen
-    startCapture(); // keep the session alive — let the user just try again
   });
   // Transport-level error (connection dropped). EventSource auto-reconnects;
   // only surface a hard failure once it gives up and closes.
@@ -437,7 +444,9 @@ function openStream() {
 }
 
 function waitForPlaybackThen(fn) {
+  const gen = playbackGen; // the turn this drain belongs to
   const check = () => {
+    if (gen !== playbackGen) return; // a barge-in / new capture superseded it
     if (!ctx || (pendingAudio === 0 && ctx.currentTime >= playHead - 0.02)) {
       fn();
     } else {

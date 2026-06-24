@@ -24,11 +24,17 @@ async function readableToBuffer(stream: Readable): Promise<Buffer> {
  * so a batch transcribe is both simpler and more accurate than streaming endpointing,
  * which matters because transcripts are persisted to chat history.
  */
-export async function transcribe(audio: Buffer): Promise<string> {
-  const res = await cartesia.stt.transcribe(new Blob([audio]), {
-    model: config.sttModel,
-    language: config.language,
-  });
+export async function transcribe(
+  audio: Buffer,
+  signal?: AbortSignal,
+): Promise<string> {
+  // Pass the abort signal so a barge-in during STT cancels the in-flight request
+  // instead of finishing a transcription whose result is already discarded.
+  const res = await cartesia.stt.transcribe(
+    new Blob([audio]),
+    { model: config.sttModel, language: config.language },
+    { abortSignal: signal },
+  );
   return res.text ?? "";
 }
 
