@@ -101,9 +101,37 @@ The route logs a per-turn breakdown: `[turn] {stt_ms, tts_ttfa_ms, total_ms}`.
 - **History is client-held** (sent each turn): simple and stateless, but lost on
   reload. Move to Vercel KV / Upstash keyed by a session id if you need persistence.
 
+## Phone line (PSTN via Twilio)
+
+NOA is also reachable on a **regular phone number** through Twilio Media Streams.
+This can't run on Vercel — Media Streams is a persistent WebSocket for the life of
+the call — so it's a standalone Node server in `server/phone.ts`, deployed to Fly.io,
+that **reuses the same `lib/` brain and voice** (`transcribe` / `runAgent` / `streamTts`).
+
+```
+Caller → Twilio number → POST /incoming-call → TwiML <Connect><Stream wss://…/media>
+       → WS bridge: μ-law 8k in → server VAD → STT → runAgent → Sonic (μ-law 8k) → caller
+```
+
+- **STT/TTS:** Cartesia, same as the browser (ConversationRelay can't use Cartesia, so
+  we use raw Media Streams). Audio bridging (μ-law 8k ↔ PCM/WAV) lives in
+  `server/telephony/audio.ts`; Sonic is asked for μ-law 8k directly.
+- **Turn-taking:** no browser VAD on a phone, so the server endpoints utterances by
+  energy + trailing silence (`server/telephony/vad.ts`, tuned in `lib/config.ts`).
+- **Caller auth:** set `TWILIO_AUTH_TOKEN` and the server validates Twilio's
+  `X-Twilio-Signature` on `/incoming-call`, then gates the `/media` socket with a
+  one-time token minted in the TwiML. Unset = unauthenticated (local dev only).
+- **Run locally:** `pnpm phone:dev`, expose with a tunnel (`cloudflared`/`ngrok`), then
+  point a Twilio number's Voice webhook at `https://<tunnel>/incoming-call` and call it.
+- **Deploy:** `fly launch --no-deploy` → `fly secrets set CARTESIA_API_KEY=… NOA_VOICE_ID=… ANTHROPIC_API_KEY=… TWILIO_AUTH_TOKEN=…` → `fly deploy`, then set the Twilio webhook to `https://<app>.fly.dev/incoming-call`.
+- **POC scope:** no phone barge-in, history lost on hangup; caller auth is optional via `TWILIO_AUTH_TOKEN` — see below.
+
 ## Next steps
 
 - Buffer agent text to clause/punctuation boundaries before sending to Sonic
   (currently token-by-token) for smoother prosody and fewer TTS round-trips.
 - Persist history server-side (Vercel KV) if reload-survival matters.
 - Benchmark Ink on real older-adult audio before launch.
+- **Phone:** add barge-in (Twilio `clear` + server VAD while speaking), validate
+  Cartesia μ-law support on SDK bumps, and tune the server-VAD silence hold for
+  older-adult callers; consider per-number allow-listing on top of the signature check.
