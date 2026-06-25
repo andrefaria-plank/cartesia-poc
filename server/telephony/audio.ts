@@ -3,40 +3,24 @@
  *
  * - Inbound:  μ-law 8k  → PCM s16le → (upsample 16k) → WAV → Cartesia Ink STT.
  * - Outbound: Cartesia Sonic is asked for μ-law 8k directly (see lib/cartesia MULAW8K),
- *   so it flows straight to Twilio with no work here. The PCM→μ-law encoder below is
- *   the fallback for if/when Sonic μ-law output is unavailable.
+ *   so it flows straight to Twilio with no encoding work here.
  *
- * Pure JS (G.711, MULAW_BIAS=33) — no native deps, so the Fly container stays slim.
+ * Pure JS standard G.711 μ-law — no native deps, so the Fly container stays slim.
  */
 
-const MULAW_BIAS = 33;
-const MULAW_MAX = 0x1fff;
+// Standard G.711 μ-law bias. Decoding with this yields the full 16-bit linear range
+// (±32124), so Ink STT receives full-amplitude audio. (An earlier 13-bit variant
+// decoded at ¼ scale / −12 dB, needlessly quietening already-noisy phone audio.)
+const MULAW_BIAS = 0x84; // 132
 
-/** One μ-law byte → 16-bit linear PCM sample. */
+/** One μ-law byte → 16-bit linear PCM sample (standard G.711). */
 function mulawDecodeSample(uByte: number): number {
   uByte = ~uByte & 0xff;
   const sign = uByte & 0x80;
-  const exponent = ((uByte & 0x70) >> 4) + 5;
-  const decoded =
-    ((1 << exponent) | ((uByte & 0x0f) << (exponent - 4)) | (1 << (exponent - 5))) - MULAW_BIAS;
-  return sign ? -decoded : decoded;
-}
-
-/** One 16-bit linear PCM sample → μ-law byte. */
-function mulawEncodeSample(sample: number): number {
-  let sign = 0;
-  if (sample < 0) {
-    sample = -sample;
-    sign = 0x80;
-  }
-  sample += MULAW_BIAS;
-  if (sample > MULAW_MAX) sample = MULAW_MAX;
-  let position = 12;
-  for (; position >= 5; position--) {
-    if (sample & (1 << position)) break;
-  }
-  const lsb = (sample >> (position - 4)) & 0x0f;
-  return ~(sign | ((position - 5) << 4) | lsb) & 0xff;
+  const exponent = (uByte & 0x70) >> 4;
+  const mantissa = uByte & 0x0f;
+  const magnitude = (((mantissa << 3) + MULAW_BIAS) << exponent) - MULAW_BIAS;
+  return sign ? -magnitude : magnitude;
 }
 
 /** Decode a μ-law buffer (one byte per sample) to Int16 PCM. */
@@ -44,13 +28,6 @@ export function mulawToPcm16(mulaw: Buffer): Int16Array {
   const pcm = new Int16Array(mulaw.length);
   for (let i = 0; i < mulaw.length; i++) pcm[i] = mulawDecodeSample(mulaw[i]);
   return pcm;
-}
-
-/** Encode Int16 PCM to a μ-law buffer (one byte per sample). */
-export function pcm16ToMulaw(pcm: Int16Array): Buffer {
-  const out = Buffer.allocUnsafe(pcm.length);
-  for (let i = 0; i < pcm.length; i++) out[i] = mulawEncodeSample(pcm[i]);
-  return out;
 }
 
 /** Upsample 8 kHz → 16 kHz by linear interpolation (2× rate). */

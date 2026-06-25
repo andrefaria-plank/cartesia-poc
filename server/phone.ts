@@ -25,19 +25,44 @@ import { config } from "../lib/config";
 import { transcribe, streamTts, MULAW8K } from "../lib/cartesia";
 import { runAgent } from "../lib/agent";
 import { connectStreamTwiml } from "./telephony/twiml";
+import { validTwilioSignature, mintWsToken, validWsToken } from "./telephony/twilioAuth";
 import { Endpointer } from "./telephony/vad";
 import { mulawToPcm16, upsample8kTo16k, pcm16ToWav } from "./telephony/audio";
 
 const PORT = Number(process.env.PORT) || 8080;
 const GREETING = "Hi, this is NOA from your home care team. How can I help you today?";
+const AUTH_TOKEN = config.telephony.authToken; // when set, callers must prove they're Twilio
 
 const server = http.createServer((req, res) => {
-  // Twilio Voice webhook: answer the call by opening a Media Stream back to us.
+  // Twilio Voice webhook: verify it's really Twilio, then answer by opening a Media
+  // Stream back to us (with a one-time token in the wss URL to gate the socket).
   if (req.method === "POST" && req.url?.startsWith("/incoming-call")) {
-    req.resume(); // drain the form body we don't need
-    const host = req.headers.host;
-    res.writeHead(200, { "Content-Type": "text/xml" });
-    res.end(connectStreamTwiml(`wss://${host}/media`));
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 64_000) req.destroy(); // Twilio webhooks are tiny; bound the read
+    });
+    req.on("end", () => {
+      const host = req.headers.host ?? "";
+      if (AUTH_TOKEN) {
+        const sig = req.headers["x-twilio-signature"];
+        const params = Object.fromEntries(new URLSearchParams(body));
+        // Twilio signs the exact public HTTPS URL it was configured to call.
+        const ok =
+          typeof sig === "string" &&
+          validTwilioSignature(AUTH_TOKEN, sig, `https://${host}${req.url}`, params);
+        if (!ok) {
+          res.writeHead(403, { "Content-Type": "text/plain" });
+          res.end("invalid Twilio signature");
+          return;
+        }
+      }
+      const wssUrl = AUTH_TOKEN
+        ? `wss://${host}/media?token=${mintWsToken(AUTH_TOKEN)}`
+        : `wss://${host}/media`;
+      res.writeHead(200, { "Content-Type": "text/xml" });
+      res.end(connectStreamTwiml(wssUrl));
+    });
     return;
   }
   if (req.url?.startsWith("/health")) {
@@ -49,10 +74,28 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 
-const wss = new WebSocketServer({ server, path: "/media" });
+// Gate the Media Streams upgrade: correct path + (when secured) a valid one-time token.
+const wss = new WebSocketServer({
+  server,
+  verifyClient: ({ req }, cb) => {
+    const { pathname, searchParams } = new URL(req.url ?? "", `http://${req.headers.host}`);
+    if (pathname !== "/media") return cb(false, 404, "Not Found");
+    if (AUTH_TOKEN && !validWsToken(AUTH_TOKEN, searchParams.get("token"))) {
+      return cb(false, 403, "Forbidden");
+    }
+    cb(true);
+  },
+});
 wss.on("connection", (ws) => handleCall(ws));
 
-server.listen(PORT, () => console.log(`[phone] listening on :${PORT}`));
+server.listen(PORT, () => {
+  console.log(`[phone] listening on :${PORT}`);
+  if (!AUTH_TOKEN) {
+    console.warn(
+      "[phone] TWILIO_AUTH_TOKEN unset — /incoming-call and /media are UNAUTHENTICATED (dev only)",
+    );
+  }
+});
 
 function handleCall(ws: WebSocket): void {
   let streamSid = "";

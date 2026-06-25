@@ -118,10 +118,13 @@ Caller → Twilio number → POST /incoming-call → TwiML <Connect><Stream wss:
   `server/telephony/audio.ts`; Sonic is asked for μ-law 8k directly.
 - **Turn-taking:** no browser VAD on a phone, so the server endpoints utterances by
   energy + trailing silence (`server/telephony/vad.ts`, tuned in `lib/config.ts`).
+- **Caller auth:** set `TWILIO_AUTH_TOKEN` and the server validates Twilio's
+  `X-Twilio-Signature` on `/incoming-call`, then gates the `/media` socket with a
+  one-time token minted in the TwiML. Unset = unauthenticated (local dev only).
 - **Run locally:** `pnpm phone:dev`, expose with a tunnel (`cloudflared`/`ngrok`), then
   point a Twilio number's Voice webhook at `https://<tunnel>/incoming-call` and call it.
-- **Deploy:** `fly launch --no-deploy` → `fly secrets set CARTESIA_API_KEY=… NOA_VOICE_ID=… ANTHROPIC_API_KEY=…` → `fly deploy`, then set the Twilio webhook to `https://<app>.fly.dev/incoming-call`.
-- **POC scope:** no phone barge-in, no caller auth, history lost on hangup — see below.
+- **Deploy:** `fly launch --no-deploy` → `fly secrets set CARTESIA_API_KEY=… NOA_VOICE_ID=… ANTHROPIC_API_KEY=… TWILIO_AUTH_TOKEN=…` → `fly deploy`, then set the Twilio webhook to `https://<app>.fly.dev/incoming-call`.
+- **POC scope:** no phone barge-in, history lost on hangup; caller auth is optional via `TWILIO_AUTH_TOKEN` — see below.
 
 ## Next steps
 
@@ -131,4 +134,4 @@ Caller → Twilio number → POST /incoming-call → TwiML <Connect><Stream wss:
 - Benchmark Ink on real older-adult audio before launch.
 - **Phone:** add barge-in (Twilio `clear` + server VAD while speaking), validate
   Cartesia μ-law support on SDK bumps, and tune the server-VAD silence hold for
-  older-adult callers; consider caller allow-listing / `X-Twilio-Signature` checks.
+  older-adult callers; consider per-number allow-listing on top of the signature check.

@@ -43,9 +43,14 @@ export const config = {
   // energy, then fire end-of-turn after a hold of trailing silence.
   telephony: {
     sampleRate: 8000, // μ-law inbound + outbound
+    // Optional Twilio Auth Token. When set, server/phone.ts validates the
+    // X-Twilio-Signature on /incoming-call and gates the /media WebSocket; when empty,
+    // the endpoints run unauthenticated (local dev) and the server logs a warning.
+    authToken: process.env.TWILIO_AUTH_TOKEN ?? "",
     // Server-side VAD, tuned higher/longer than the browser (public/app.js) because
-    // phone audio is noisier and older-adult callers pause mid-sentence.
-    speechRms: 0.02, // frame RMS above this counts as speech
+    // phone audio is noisier and older-adult callers pause mid-sentence. The RMS
+    // threshold tracks the standard-G.711 decode scale in server/telephony/audio.ts.
+    speechRms: 0.08, // frame RMS above this counts as speech
     silenceHoldMs: 900, // trailing silence that ends an utterance
     minUtteranceMs: 300, // ignore sub-blips (coughs, line noise)
     sttSampleRate: 16000, // upsample target for Ink STT
