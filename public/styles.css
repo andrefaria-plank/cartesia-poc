@@ -698,6 +698,40 @@ button {
   }
 }
 
+/* Barge-in: manual override, shown only while NOA is replying. */
+.voice-stage__interrupt {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-block-end: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: 999px;
+  border: 1px solid var(--color-danger);
+  background: var(--color-surface);
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out-quart),
+    color var(--dur-fast) var(--ease-out-quart),
+    transform var(--dur-fast) var(--ease-out-quart);
+}
+.voice-stage__interrupt:hover {
+  background: var(--color-danger);
+  color: #fff;
+}
+.voice-stage__interrupt:active {
+  transform: scale(0.96);
+}
+.voice-stage__interrupt[hidden] {
+  display: none;
+}
+.voice-stage__interrupt svg {
+  inline-size: 0.95rem;
+  block-size: 0.95rem;
+}
+
 /* ---- Tool-result cards rail (floats over the stage edge) ------------ */
 .cards-rail {
   position: absolute;

@@ -14,6 +14,10 @@ export const maxDuration = 60; // a turn is bounded; recording is capped at 30s 
  * Request:  multipart form { audio: Blob, history: JSON string }
  * Response: SSE wire format (event:/data: lines), one ordered stream:
  *   transcript → text → card → audio → done{history}   (or turn_error{message})
+ *
+ * Barge-in: there is no separate abort endpoint — the turn IS the request, so the
+ * client just aborts its `fetch`. That fires `req.signal`, which we thread into the
+ * agent + Sonic so a cut tears the turn down at once and emits no `done` (no commit).
  */
 export async function POST(req: Request): Promise<Response> {
   let audio: Buffer;
@@ -32,15 +36,24 @@ export async function POST(req: Request): Promise<Response> {
 
   const t0 = performance.now();
   const enc = new TextEncoder();
+  const signal = req.signal; // aborts when the client cancels the fetch (barge-in)
 
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: string, data: unknown) =>
-        controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      let closed = false;
+      const send = (event: string, data: unknown) => {
+        if (closed || signal.aborted) return;
+        try {
+          controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          closed = true; // stream already torn down (client gone)
+        }
+      };
 
       try {
         // STT (Ink) — whole utterance.
         const userText = await transcribe(audio);
+        if (signal.aborted) return;
         const tStt = performance.now();
         send("transcript", { text: userText });
 
@@ -48,7 +61,8 @@ export async function POST(req: Request): Promise<Response> {
         // The terminal `history` event is captured for the `done` payload.
         let newHistory: MessageParam[] = history;
         const textStream = (async function* (): AsyncIterable<string> {
-          for await (const ev of runAgent(history, userText) as AsyncIterable<AgentEvent>) {
+          for await (const ev of runAgent(history, userText, signal) as AsyncIterable<AgentEvent>) {
+            if (signal.aborted) return;
             if (ev.kind === "text") {
               send("text", { delta: ev.delta });
               yield ev.delta;
@@ -62,11 +76,19 @@ export async function POST(req: Request): Promise<Response> {
 
         // Stream agent tokens into Sonic; relay each PCM chunk in order.
         let tFirstAudio = 0;
-        await streamTts(textStream, (pcmBase64) => {
-          if (!tFirstAudio) tFirstAudio = performance.now();
-          send("audio", { audio: pcmBase64 });
-        });
+        await streamTts(
+          textStream,
+          (pcmBase64) => {
+            if (signal.aborted) return;
+            if (!tFirstAudio) tFirstAudio = performance.now();
+            send("audio", { audio: pcmBase64 });
+          },
+          signal,
+        );
 
+        // A barge-in cut leaves silently — no `done`, so the client (already moved
+        // on to the interrupting utterance) won't re-arm or commit against this turn.
+        if (signal.aborted) return;
         // Turn complete — hand the new history back for the next turn.
         send("done", { history: newHistory });
 
@@ -80,10 +102,14 @@ export async function POST(req: Request): Promise<Response> {
           }),
         );
       } catch (err) {
-        // Distinct from any transport error; the client surfaces it and re-arms.
-        send("turn_error", { message: (err as Error).message });
+        // A barge-in abort can surface here too — don't report it as a failure.
+        if (!signal.aborted) send("turn_error", { message: (err as Error).message });
       } finally {
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
       }
     },
   });

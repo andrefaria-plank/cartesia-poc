@@ -36,6 +36,9 @@ Rules:
 export async function* runAgent(
   history: MessageParam[],
   userText: string,
+  // Aborts when the client barges in (cancels its fetch). We stop WITHOUT yielding
+  // the terminal `history` event, so the interrupted turn commits nothing server-side.
+  signal?: AbortSignal,
 ): AsyncIterable<AgentEvent> {
   // Build the turn on a COPY of the incoming history; only the terminal `history`
   // event (emitted after a fully successful turn) commits it. A mid-loop failure
@@ -45,20 +48,30 @@ export async function* runAgent(
 
   // Agentic loop: stream text, run any tools, feed results back, repeat until Claude stops.
   for (let hop = 0; hop < 6; hop++) {
-    const stream = anthropic.messages.stream({
-      model: config.agentModel,
-      max_tokens: 512,
-      system: SYSTEM,
-      tools: toolDefs,
-      messages,
-    });
+    const stream = anthropic.messages.stream(
+      {
+        model: config.agentModel,
+        max_tokens: 512,
+        system: SYSTEM,
+        tools: toolDefs,
+        messages,
+      },
+      { signal },
+    );
 
-    for await (const event of stream) {
-      if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-        yield { kind: "text", delta: event.delta.text }; // spoken -> Sonic
+    try {
+      for await (const event of stream) {
+        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+          yield { kind: "text", delta: event.delta.text }; // spoken -> Sonic
+        }
       }
+    } catch (err) {
+      // A barge-in aborts the underlying request: unwind quietly, dropping the turn.
+      if (signal?.aborted) return;
+      throw err;
     }
 
+    if (signal?.aborted) return; // abort landed between deltas — discard the turn
     const msg = await stream.finalMessage();
     messages.push({ role: "assistant", content: msg.content });
 

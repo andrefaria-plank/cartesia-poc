@@ -1,6 +1,9 @@
 // NOA Voice Mode — browser client.
 // Turn-based voice loop over SSE: open stream → record → POST utterance →
 // filler + transcript + streamed text/cards + ordered PCM audio → done → re-arm.
+// Barge-in: the mic stays live while NOA speaks; a higher-threshold VAD (or a tap /
+// the Interrupt button) cuts her off — playback stops, the in-flight turn is aborted,
+// and we listen again, preserving the words you opened with.
 // The UI is a full-screen "voice stage": a live spectrum waveform whose bars
 // are driven per-frame by the mic (listening) or the playback bus (speaking),
 // a phase machine, projector-legible captions, and floating tool-result cards.
@@ -36,12 +39,17 @@ let fillers = []; // base64 PCM clips, loaded once from /fillers.json
 let ctx = null;
 let master = null; // GainNode → destination, taps playbackAnalyser
 let playbackAnalyser = null;
-let micAnalyser = null;
-let micStream = null;
+let micAnalyser = null; // session-scoped: lives for the whole voice session
+let micStream = null; // opened once on enter, closed on exit (so barge-in can hear)
 let playHead = 0;
 let pendingAudio = 0; // scheduled chunks still to finish playing
 let phase = "connecting";
 let assistantText = "";
+let currentUserText = ""; // transcript of the in-flight turn (for partial history)
+
+const liveSources = new Set(); // scheduled playback buffers, for an instant cut
+let turnController = null; // AbortController for the in-flight /api/voice fetch
+let turnGen = 0; // bumped per listening turn; stale async work checks against it
 
 // ── Phase machine ────────────────────────────────────────────────────
 const PHASE_LABEL = {
@@ -53,7 +61,6 @@ const PHASE_LABEL = {
   speaking: "Speaking",
   error: "Connection error",
 };
-const BUSY = new Set(["listening", "transcribing", "thinking", "speaking"]);
 
 function setPhase(p) {
   phase = p;
@@ -62,15 +69,19 @@ function setPhase(p) {
   $("phaseLabel").textContent = PHASE_LABEL[p] ?? p;
   const line = $("controlLine");
   const hint = $("controlHint");
+  const btn = $("interrupt");
+  // While NOA is replying, the manual interrupt affordance is available.
+  const replying = p === "speaking" || p === "thinking" || p === "transcribing";
+  if (btn) btn.hidden = !replying;
   if (p === "listening") {
     line.textContent = "Listening for you…";
     hint.textContent = "Tap the wave to stop · NOA replies when you pause";
   } else if (p === "speaking") {
     line.textContent = "NOA is speaking";
-    hint.textContent = "No barge-in — NOA finishes, then the mic re-arms";
+    hint.textContent = "Just start talking — or tap — to cut in";
   } else if (p === "thinking" || p === "transcribing") {
     line.textContent = "Working…";
-    hint.textContent = "Looking up your account";
+    hint.textContent = "Looking up your account · talk to cut in";
   } else if (p === "error") {
     line.textContent = "Something went wrong";
     hint.textContent = "Tap the wave to try again";
@@ -280,10 +291,26 @@ function enqueuePcm(b64) {
   src.start(start);
   playHead = start + buf.duration;
   pendingAudio++;
+  liveSources.add(src);
   if (phase !== "speaking") setPhase("speaking");
   src.onended = () => {
     pendingAudio = Math.max(0, pendingAudio - 1);
+    liveSources.delete(src);
   };
+}
+
+// Cut all scheduled/playing audio at once (barge-in). Silence is immediate.
+function cutPlayback() {
+  for (const s of liveSources) {
+    try {
+      s.stop();
+    } catch {
+      /* already stopped */
+    }
+  }
+  liveSources.clear();
+  pendingAudio = 0;
+  if (ctx) playHead = ctx.currentTime;
 }
 
 // ── Waveform render loop (drives every bar each frame) ────────────────
@@ -364,10 +391,13 @@ function playFiller() {
   enqueuePcm(fillers[Math.floor(Math.random() * fillers.length)]);
 }
 
-// Dispatch one parsed SSE event to the UI.
-function handleEvent(event, data) {
+// Dispatch one parsed SSE event to the UI. `gen` is the turn it belongs to;
+// if a barge-in has since started a new turn, the frame is dropped.
+function handleEvent(event, data, gen) {
+  if (gen !== turnGen) return;
   if (event === "transcript") {
     const t = data.text || "";
+    currentUserText = t; // remember it in case this turn gets interrupted
     if (t) setCaption("You", t, false);
   } else if (event === "text") {
     assistantText += data.delta;
@@ -379,32 +409,42 @@ function handleEvent(event, data) {
   } else if (event === "done") {
     if (Array.isArray(data.history)) history = data.history; // adopt new history
     waitForPlaybackThen(() => {
+      if (gen !== turnGen) return; // barged during the spoken tail
       if (assistantText.trim()) setCaption("NOA", assistantText.trim(), false);
       setPhase("paused"); // clear "speaking" so the re-arm guard lets us listen
-      startVoiceTurn();
+      startListening();
     });
   } else if (event === "turn_error") {
     // Server caught an error mid-turn (no `done` follows). Surface it and drop
     // to a tappable idle state — deliberately no auto re-arm so it can be read.
     console.warn("[turn_error]", data.message);
+    stopBargeWatch();
     setPhase("paused");
     setCaption("NOA", "Sorry, I hit a problem. Tap the wave to try again.", false);
   }
 }
 
 // POST the utterance + history; stream the turn back and dispatch each frame.
-async function postTurn(audioBlob) {
+// The fetch is abortable so a barge-in tears the whole turn down at once.
+async function postTurn(audioBlob, gen) {
   const fd = new FormData();
   fd.append("audio", audioBlob, "turn.webm");
   fd.append("history", JSON.stringify(history));
 
+  turnController = new AbortController();
   let res;
   try {
-    res = await fetch("/api/voice", { method: "POST", body: fd });
+    res = await fetch("/api/voice", {
+      method: "POST",
+      body: fd,
+      signal: turnController.signal,
+    });
   } catch {
+    if (gen !== turnGen) return; // aborted by a barge-in — expected
     setPhase("error");
     return;
   }
+  if (gen !== turnGen) return;
   if (!res.ok || !res.body) {
     setPhase("error");
     return;
@@ -413,28 +453,35 @@ async function postTurn(audioBlob) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    // SSE frames are separated by a blank line.
-    let sep;
-    while ((sep = buf.indexOf("\n\n")) !== -1) {
-      const frame = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      let event = "message";
-      let dataStr = "";
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
-      }
-      if (!dataStr) continue;
-      try {
-        handleEvent(event, JSON.parse(dataStr));
-      } catch {
-        /* skip malformed frame */
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (gen !== turnGen) return; // a barge-in superseded this turn
+      buf += decoder.decode(value, { stream: true });
+      // SSE frames are separated by a blank line.
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let event = "message";
+        let dataStr = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+        }
+        if (!dataStr) continue;
+        try {
+          handleEvent(event, JSON.parse(dataStr), gen);
+        } catch {
+          /* skip malformed frame */
+        }
       }
     }
+  } catch {
+    // Reader threw — usually our own abort (barge-in); otherwise a dropped stream.
+    if (gen !== turnGen) return;
+    setPhase("error");
   }
 }
 
@@ -449,10 +496,52 @@ function waitForPlaybackThen(fn) {
   check();
 }
 
-// ── Mic capture + VAD (auto-stop on trailing silence) ────────────────
-const SILENCE_RMS = 0.012;
+// ── Mic session (opened once; lives across turns so barge-in can hear) ─
+async function openMic() {
+  if (micStream) return true;
+  ensureCtx();
+  try {
+    // Echo cancellation keeps NOA's own playback out of the mic, so her voice
+    // can't trip the barge-in detector while she's speaking.
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch {
+    setPhase("error");
+    setCaption("", "Microphone access denied.", false);
+    return false;
+  }
+  micAnalyser = ctx.createAnalyser();
+  micAnalyser.fftSize = 1024;
+  micAnalyser.smoothingTimeConstant = 0.4;
+  ctx.createMediaStreamSource(micStream).connect(micAnalyser);
+  return true;
+}
+function closeMic() {
+  micStream?.getTracks().forEach((t) => t.stop());
+  micStream = null;
+  micAnalyser = null;
+}
+
+let vadBuf = null;
+function micLevel() {
+  if (!micAnalyser) return 0;
+  if (!vadBuf || vadBuf.length !== micAnalyser.fftSize)
+    vadBuf = new Float32Array(micAnalyser.fftSize);
+  micAnalyser.getFloatTimeDomainData(vadBuf);
+  let sum = 0;
+  for (let i = 0; i < vadBuf.length; i++) sum += vadBuf[i] * vadBuf[i];
+  return Math.sqrt(sum / vadBuf.length);
+}
+
+// ── Capture VAD (auto-stop on trailing silence) + barge VAD ──────────
+const SILENCE_RMS = 0.012; // end-of-utterance threshold while listening
 const SILENCE_HOLD_MS = 1400;
 const MAX_TURN_MS = 30000;
+// Barge-in needs a higher bar than ordinary silence so NOA's residual audio or a
+// stray noise won't trigger it; sustained speech past the hold is a real interrupt.
+const BARGE_RMS = 0.05;
+const BARGE_HOLD_MS = 280;
 
 let rec = null;
 let chunks = [];
@@ -462,66 +551,65 @@ let hasSpoken = false;
 let listening = false;
 let maxTimer = null;
 
-async function startVoiceTurn() {
-  if (listening) return;
-  if (BUSY.has(phase) && phase !== "listening") return;
-  ensureCtx();
-  if (ctx.state === "suspended") await ctx.resume();
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    setPhase("error");
-    setCaption("", "Microphone access denied.", false);
-    return;
-  }
-  // Tap the same stream for the live spectrum while listening.
-  micAnalyser = ctx.createAnalyser();
-  micAnalyser.fftSize = 1024;
-  micAnalyser.smoothingTimeConstant = 0.55;
-  ctx.createMediaStreamSource(micStream).connect(micAnalyser);
+// Barge watcher state
+let bargeRAF = null;
+let bargeSince = 0; // when the current run of above-threshold speech began
+let provisional = false; // a recorder started at barge onset, not yet committed
 
-  rec = new MediaRecorder(micStream);
-  chunks = [];
-  rec.ondataavailable = (e) => chunks.push(e.data);
-  rec.onstop = onRecStop;
-  rec.start();
+// Begin (or adopt) a listening turn. `adopt` keeps the provisional recorder that
+// a barge-in already started, so the user's opening words aren't clipped.
+function startListening({ adopt = false } = {}) {
+  if (listening) return;
+  stopBargeWatch();
+  if (maxTimer) {
+    clearTimeout(maxTimer);
+    maxTimer = null;
+  }
+  const gen = ++turnGen; // invalidates any still-draining previous turn
   listening = true;
-  hasSpoken = false;
   silenceSince = 0;
+  hasSpoken = adopt; // adopting means the user is already mid-word
+
+  if (adopt && rec && rec.state === "recording") {
+    provisional = false; // promote the onset recorder to this turn's recorder
+    rec.onstop = () => onUtteranceEnd(gen);
+  } else {
+    rec = new MediaRecorder(micStream);
+    chunks = [];
+    rec.ondataavailable = (e) => chunks.push(e.data);
+    rec.onstop = () => onUtteranceEnd(gen);
+    rec.start();
+  }
 
   // New turn: clear the previous reply + its cards from the stage.
   assistantText = "";
+  currentUserText = "";
   clearCards();
   setPhase("listening");
   setCaption("", "", false);
-  startVad();
+  startCaptureVad();
   maxTimer = setTimeout(stopRec, MAX_TURN_MS);
 }
 
-async function onRecStop() {
-  stopVad();
-  micStream?.getTracks().forEach((t) => t.stop());
-  micAnalyser = null;
+async function onUtteranceEnd(gen) {
+  if (gen !== turnGen) return; // superseded
+  stopCaptureVad();
   listening = false;
   // Nothing said (re-arm noise or a silent timeout) → just listen again.
   if (!hasSpoken) {
-    startVoiceTurn();
+    startListening();
     return;
   }
   setPhase("thinking");
   playFiller(); // instant latency mask, no server round-trip
-  await postTurn(new Blob(chunks, { type: "audio/webm" }));
+  startBargeWatch(); // you can cut in during thinking AND speaking
+  await postTurn(new Blob(chunks, { type: "audio/webm" }), gen);
 }
 
-function startVad() {
-  const analyser = micAnalyser;
-  const data = new Float32Array(analyser.fftSize);
+function startCaptureVad() {
   const tick = () => {
     if (!listening) return;
-    analyser.getFloatTimeDomainData(data);
-    let sum = 0;
-    for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-    const rms = Math.sqrt(sum / data.length);
+    const rms = micLevel();
     const now = performance.now();
     if (rms >= SILENCE_RMS) {
       hasSpoken = true;
@@ -537,7 +625,7 @@ function startVad() {
   };
   vadRAF = requestAnimationFrame(tick);
 }
-function stopVad() {
+function stopCaptureVad() {
   if (vadRAF) cancelAnimationFrame(vadRAF);
   if (maxTimer) clearTimeout(maxTimer);
   vadRAF = null;
@@ -547,22 +635,128 @@ function stopRec() {
   if (rec && rec.state !== "inactive") rec.stop();
 }
 
-// The wave is the single control: stop while listening, (re)start while idle.
+// While NOA replies, watch the live mic for the user talking over her. We start
+// capturing at the first sign of speech (so onset isn't lost) but only commit to
+// an interrupt once that speech is sustained past BARGE_HOLD_MS.
+function startBargeWatch() {
+  if (bargeRAF) return;
+  bargeSince = 0;
+  const tick = () => {
+    if (phase !== "speaking" && phase !== "thinking" && phase !== "transcribing") {
+      bargeRAF = null;
+      cancelProvisionalRecorder();
+      bargeSince = 0;
+      return;
+    }
+    const rms = micLevel();
+    const now = performance.now();
+    if (rms >= BARGE_RMS) {
+      if (!bargeSince) {
+        bargeSince = now;
+        startProvisionalRecorder(); // capture the opening words now
+      } else if (now - bargeSince >= BARGE_HOLD_MS) {
+        bargeIn({ adopt: true });
+        return;
+      }
+    } else if (bargeSince) {
+      // The blip died before the hold — not an interrupt. Discard, keep playing.
+      cancelProvisionalRecorder();
+      bargeSince = 0;
+    }
+    bargeRAF = requestAnimationFrame(tick);
+  };
+  bargeRAF = requestAnimationFrame(tick);
+}
+function stopBargeWatch() {
+  if (bargeRAF) cancelAnimationFrame(bargeRAF);
+  bargeRAF = null;
+  bargeSince = 0;
+  cancelProvisionalRecorder();
+}
+
+function startProvisionalRecorder() {
+  if (provisional || !micStream) return;
+  rec = new MediaRecorder(micStream);
+  chunks = [];
+  rec.ondataavailable = (e) => chunks.push(e.data);
+  rec.onstop = null; // not bound to a turn until the barge commits
+  rec.start();
+  provisional = true;
+}
+function cancelProvisionalRecorder() {
+  if (!provisional) return;
+  provisional = false;
+  const r = rec;
+  rec = null;
+  chunks = [];
+  if (r && r.state !== "inactive") {
+    r.ondataavailable = null;
+    r.onstop = null;
+    try {
+      r.stop();
+    } catch {
+      /* already stopped */
+    }
+  }
+}
+
+// The interrupt itself — shared by the voice trigger, the wave tap, and the button.
+function bargeIn({ adopt = false } = {}) {
+  if (phase !== "speaking" && phase !== "thinking" && phase !== "transcribing")
+    return;
+  // 1) Remember the interrupted exchange so NOA stays coherent across the cut.
+  commitPartialHistory();
+  // 2) Silence NOA and abort the server turn (no `done`, so nothing re-arms it).
+  cutPlayback();
+  turnController?.abort();
+  // 3) Stop the watcher loop, but keep the onset recorder when adopting it.
+  if (bargeRAF) {
+    cancelAnimationFrame(bargeRAF);
+    bargeRAF = null;
+  }
+  bargeSince = 0;
+  if (adopt && provisional && rec && rec.state === "recording") {
+    startListening({ adopt: true });
+  } else {
+    cancelProvisionalRecorder();
+    startListening();
+  }
+}
+
+// Record the interrupted turn locally. The server aborted without committing, so
+// we reconstruct a minimal text-only record: the user's question + the words NOA
+// actually spoke, marked as cut off. (Tool-call blocks for the dropped turn are
+// intentionally omitted — that turn won't continue.)
+function commitPartialHistory() {
+  const u = currentUserText.trim();
+  if (!u) return; // never saw the transcript → nothing reliable to record
+  const a = assistantText.trim();
+  history.push({ role: "user", content: u });
+  history.push({
+    role: "assistant",
+    content: a ? a + " — [interrupted by the user]" : "[interrupted before responding]",
+  });
+}
+
+// The wave is the single primary control: stop while listening, interrupt while
+// NOA replies, or (re)start while idle.
 function handleWaveTap() {
   if (listening) {
     stopRec();
     return;
   }
-  if (phase === "speaking" || phase === "thinking" || phase === "transcribing")
-    return; // no barge-in
-  startVoiceTurn();
+  if (phase === "speaking" || phase === "thinking" || phase === "transcribing") {
+    bargeIn(); // manual interrupt: no onset recorder, the user taps then speaks
+    return;
+  }
+  startListening();
 }
 
 // ── Enter / exit the voice stage ─────────────────────────────────────
-function enterVoiceMode() {
+async function enterVoiceMode() {
   // Unlock audio inside the click gesture; the first playback comes later.
   ensureCtx();
-  if (ctx.state === "suspended") ctx.resume();
+  if (ctx.state === "suspended") await ctx.resume();
   $("landing").hidden = true;
   $("stage").hidden = false;
   $("stage").focus();
@@ -574,14 +768,19 @@ function enterVoiceMode() {
   $("statusRow").dataset.live = "true";
   $("statusText").textContent = "Live";
   setPhase("connecting");
-  startVoiceTurn(); // hands-free: begin listening immediately
+  // Open the mic once for the whole session, then go hands-free.
+  if (await openMic()) startListening();
 }
 
 function exitVoiceMode() {
+  turnGen++; // invalidate any in-flight turn callbacks
+  turnController?.abort();
   stopRec();
-  stopVad();
+  stopCaptureVad();
+  stopBargeWatch();
+  cutPlayback();
   listening = false;
-  micStream?.getTracks().forEach((t) => t.stop());
+  closeMic();
   $("statusRow").dataset.live = "false";
   $("statusText").textContent = "Idle";
   $("stage").hidden = true;
@@ -604,6 +803,7 @@ function exitVoiceMode() {
 $("start").onclick = enterVoiceMode;
 $("wave").onclick = handleWaveTap;
 $("exit").onclick = exitVoiceMode;
+$("interrupt").onclick = () => bargeIn();
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("stage").hidden) exitVoiceMode();
 });
