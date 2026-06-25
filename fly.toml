@@ -1,0 +1,29 @@
+# Fly.io app for the NOA telephony bridge (server/phone.ts).
+# Deploy:  fly launch --no-deploy   (creates the app)
+#          fly secrets set CARTESIA_API_KEY=… NOA_VOICE_ID=… ANTHROPIC_API_KEY=…
+#          fly deploy
+# Then point the Twilio number's Voice webhook at:
+#          https://<app>.fly.dev/incoming-call   (HTTP POST)
+app = "noa-phone"
+primary_region = "iad" # keep near your Twilio number's region
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  # Keep one machine warm so the first call of the day isn't a cold start.
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "get"
+    path = "/health"
+    interval = "15s"
+    timeout = "2s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

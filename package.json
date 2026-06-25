@@ -17,6 +17,8 @@
     "start": "next start",
     "bench": "tsx scripts/benchmark.ts",
     "gen:fillers": "tsx scripts/gen-fillers.ts",
+    "phone:dev": "tsx watch server/phone.ts",
+    "phone:start": "tsx server/phone.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -25,12 +27,14 @@
     "dotenv": "^16.4.5",
     "next": "^16.2.9",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.5.12",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0"
   }

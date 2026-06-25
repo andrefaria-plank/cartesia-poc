@@ -13,6 +13,27 @@ const OUTPUT_FORMAT = {
   sampleRate: config.sampleRate,
 } as const;
 
+// Sonic output formats. The browser path wants raw PCM s16le @ 16k (Web Audio);
+// the telephony path wants raw μ-law @ 8k so chunks drop straight into Twilio
+// Media Streams `media` messages with no resampling on our side.
+export type TtsOutputFormat = {
+  container: "raw";
+  encoding: "pcm_s16le" | "pcm_mulaw";
+  sampleRate: number;
+};
+
+export const PCM16K: TtsOutputFormat = {
+  container: "raw",
+  encoding: "pcm_s16le",
+  sampleRate: config.sampleRate,
+};
+
+export const MULAW8K: TtsOutputFormat = {
+  container: "raw",
+  encoding: "pcm_mulaw",
+  sampleRate: 8000,
+};
+
 async function readableToBuffer(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.from(chunk));
@@ -53,15 +74,14 @@ export async function synthesizeOnce(transcript: string): Promise<string> {
  */
 export async function streamTts(
   textDeltas: AsyncIterable<string>,
-  onAudioChunk: (pcmBase64: string) => void,
+  // Receives base64-encoded audio in whatever `outputFormat` requested
+  // (PCM s16le for the browser, μ-law for telephony).
+  onAudioChunk: (audioBase64: string) => void,
   // Aborts on barge-in: drop the socket and unblock `finished` so the turn tears down at once.
   signal?: AbortSignal,
+  outputFormat: TtsOutputFormat = PCM16K,
 ): Promise<void> {
-  const ws = cartesia.tts.websocket({
-    container: "raw",
-    encoding: "pcm_s16le",
-    sampleRate: config.sampleRate,
-  });
+  const ws = cartesia.tts.websocket(outputFormat);
   await ws.connect();
   const contextId = randomUUID();
 
